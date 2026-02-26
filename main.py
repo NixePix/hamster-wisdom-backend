@@ -4,7 +4,8 @@ from pydantic import BaseModel
 import os
 import httpx
 import random
-import asyncpg
+import psycopg2
+import psycopg2.extras
 
 app = FastAPI(title="Hamster Wisdom API 🐹")
 
@@ -48,13 +49,15 @@ GERALD_SEED_WISDOMS = [
     ("Dreams are just the wheel, but you are running toward something.", "Gerald"),
 ]
 
-async def setup_database():
+
+def setup_database():
     if not DB_URL:
         print("No DB_URL configured, skipping DB setup")
         return
     try:
-        conn = await asyncpg.connect(DB_URL)
-        await conn.execute("""
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS wisdoms (
                 id BIGSERIAL PRIMARY KEY,
                 wisdom TEXT NOT NULL,
@@ -63,36 +66,44 @@ async def setup_database():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
-        count = await conn.fetchval("SELECT COUNT(*) FROM wisdoms")
+        conn.commit()
+        cur.execute("SELECT COUNT(*) FROM wisdoms")
+        count = cur.fetchone()[0]
         if count == 0:
             for wisdom, author in GERALD_SEED_WISDOMS:
-                await conn.execute(
-                    "INSERT INTO wisdoms (wisdom, author, approved) VALUES ($1, $2, $3)",
-                    wisdom, author, True
+                cur.execute(
+                    "INSERT INTO wisdoms (wisdom, author, approved) VALUES (%s, %s, %s)",
+                    (wisdom, author, True)
                 )
-            print(f"🐹 Seeded {len(GERALD_SEED_WISDOMS)} Gerald wisdoms!")
+            conn.commit()
+            print(f"Seeded {len(GERALD_SEED_WISDOMS)} Gerald wisdoms!")
         else:
-            print(f"🐹 Database already has {count} wisdoms, skipping seed.")
-        await conn.close()
-        print("🐹 Database setup complete!")
+            print(f"Database already has {count} wisdoms.")
+        cur.close()
+        conn.close()
+        print("Database setup complete!")
     except Exception as e:
         print(f"Database setup error: {e}")
 
+
 @app.on_event("startup")
 async def startup():
-    await setup_database()
+    setup_database()
+
 
 class WisdomSubmit(BaseModel):
     wisdom: str
     author: str = "Anonymous Hamster"
 
+
 @app.get("/")
 def root():
     return {
-        "message": "🐹 Gerald the Hamster is spinning his wheel and thinking...",
+        "message": "Gerald the Hamster is spinning his wheel and thinking...",
         "docs": "/docs",
         "endpoints": ["/wisdom/random", "/wisdom/all", "/wisdom/submit", "/wisdom/count"]
     }
+
 
 @app.get("/wisdom/random")
 async def get_random_wisdom():
@@ -108,6 +119,7 @@ async def get_random_wisdom():
         return {"id": 0, "wisdom": "The wheel never lies. Only you lie. About the wheel.", "author": "Gerald", "approved": True}
     return random.choice(items)
 
+
 @app.get("/wisdom/all")
 async def get_all_wisdom():
     async with httpx.AsyncClient() as client:
@@ -118,6 +130,7 @@ async def get_all_wisdom():
     if resp.status_code != 200:
         raise HTTPException(status_code=500, detail="Gerald knocked over the database.")
     return resp.json()
+
 
 @app.post("/wisdom/submit")
 async def submit_wisdom(body: WisdomSubmit):
@@ -133,7 +146,8 @@ async def submit_wisdom(body: WisdomSubmit):
         )
     if resp.status_code not in (200, 201):
         raise HTTPException(status_code=500, detail="Gerald ate your submission. Try again.")
-    return {"message": "✅ Gerald approves. Your wisdom joins the wheel.", "data": resp.json()}
+    return {"message": "Gerald approves. Your wisdom joins the wheel.", "data": resp.json()}
+
 
 @app.get("/wisdom/count")
 async def get_count():
