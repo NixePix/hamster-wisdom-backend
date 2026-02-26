@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import os
 import httpx
 import random
+import asyncpg
 
 app = FastAPI(title="Hamster Wisdom API 🐹")
 
@@ -15,8 +16,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_API_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_API_KEY", "")
+SUPABASE_DB_PASS = os.environ.get("SUPABASE_DB_PASS", "")
+
+# Extract project ref from URL: https://XXXX.supabase.co
+PROJECT_REF = SUPABASE_URL.replace("https://", "").split(".")[0] if SUPABASE_URL else ""
+DB_URL = f"postgresql://postgres:{SUPABASE_DB_PASS}@db.{PROJECT_REF}.supabase.co:5432/postgres" if PROJECT_REF else ""
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -25,13 +31,80 @@ HEADERS = {
     "Prefer": "return=representation",
 }
 
+GERALD_SEED_WISDOMS = [
+    ("The wheel never lies. Only you lie. About the wheel.", "Gerald"),
+    ("If you bury a sunflower seed, you will find it again. Probably. Unless Dave dug it up. I hate Dave.", "Gerald"),
+    ("Sleep 16 hours a day. The problems will still be there, but you won't care as much.", "Gerald"),
+    ("Always check both sides before crossing. Unless you are running FROM something. Then just run.", "Gerald"),
+    ("The cheeks can hold more than the heart. This is both practical and metaphorical.", "Gerald"),
+    ("A clean cage is a sign of a troubled mind. Truly wise hamsters nest in chaos.", "Gerald"),
+    ("Never trust anyone who doesn't offer you a sunflower seed within the first 30 seconds.", "Gerald"),
+    ("The fastest wheel spinner is not always the wisest. But they are the coolest.", "Gerald"),
+    ("When in doubt, stuff more in your cheeks. This applies to food AND opinions.", "Gerald"),
+    ("I have been running for 3 hours and have gone nowhere. This is called a career.", "Gerald"),
+    ("Some say the glass is half full. I say: is that water or pee? Important distinction.", "Gerald"),
+    ("You will never regret nesting in something soft. Unless it is a sock. Socks are a trap.", "Gerald"),
+    ("If your human has not fed you in 10 minutes, scream. Volume communicates urgency.", "Gerald"),
+    ("The small ones bite hardest. Remember this. I am small.", "Gerald"),
+    ("Dreams are just the wheel, but you are running toward something.", "Gerald"),
+]
+
+async def setup_database():
+    """Create table via direct PostgreSQL connection and seed if empty"""
+    if not DB_URL:
+        print("No DB_URL configured, skipping DB setup")
+        return
+    
+    try:
+        conn = await asyncpg.connect(DB_URL)
+        
+        # Create table if not exists
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS wisdoms (
+                id BIGSERIAL PRIMARY KEY,
+                wisdom TEXT NOT NULL,
+                author TEXT DEFAULT 'Gerald',
+                approved BOOLEAN DEFAULT true,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        
+        # Check if empty
+        count = await conn.fetchval("SELECT COUNT(*) FROM wisdoms")
+        
+        if count == 0:
+            # Seed with Gerald's wisdom
+            for wisdom, author in GERALD_SEED_WISDOMS:
+                await conn.execute(
+                    "INSERT INTO wisdoms (wisdom, author, approved) VALUES ($1, $2, $3)",
+                    wisdom, author, True
+                )
+            print(f"🐹 Seeded {len(GERALD_SEED_WISDOMS)} Gerald wisdoms!")
+        else:
+            print(f"🐹 Database already has {count} wisdoms, skipping seed.")
+        
+        await conn.close()
+        print("🐹 Database setup complete!")
+        
+    except Exception as e:
+        print(f"Database setup error: {e}")
+        # Don't crash - app can still work if table already exists
+
+@app.on_event("startup")
+async def startup():
+    await setup_database()
+
 class WisdomSubmit(BaseModel):
     wisdom: str
     author: str = "Anonymous Hamster"
 
 @app.get("/")
 def root():
-    return {"message": "🐹 Gerald the Hamster is spinning his wheel and thinking..."}
+    return {
+        "message": "🐹 Gerald the Hamster is spinning his wheel and thinking...",
+        "docs": "/docs",
+        "endpoints": ["/wisdom/random", "/wisdom/all", "/wisdom/submit", "/wisdom/count"]
+    }
 
 @app.get("/wisdom/random")
 async def get_random_wisdom():
@@ -67,7 +140,7 @@ async def get_all_wisdom():
 
 @app.post("/wisdom/submit")
 async def submit_wisdom(body: WisdomSubmit):
-    """Submit your own hamster wisdom (goes into the pending pile)"""
+    """Submit your own hamster wisdom"""
     if len(body.wisdom) < 5:
         raise HTTPException(status_code=400, detail="Gerald demands more words.")
     if len(body.wisdom) > 280:
@@ -80,7 +153,7 @@ async def submit_wisdom(body: WisdomSubmit):
             json={
                 "wisdom": body.wisdom,
                 "author": body.author[:50],
-                "approved": True,  # auto-approve for fun
+                "approved": True,
             },
         )
     if resp.status_code not in (200, 201):
@@ -92,7 +165,7 @@ async def get_count():
     """How many wisdoms does Gerald hold?"""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/wisdoms?select=count&approved=eq.true",
+            f"{SUPABASE_URL}/rest/v1/wisdoms?select=id&approved=eq.true",
             headers={**HEADERS, "Prefer": "count=exact"},
         )
     count = resp.headers.get("content-range", "?/?").split("/")[-1]
