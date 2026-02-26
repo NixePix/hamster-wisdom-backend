@@ -20,7 +20,6 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_API_KEY", "")
 SUPABASE_DB_PASS = os.environ.get("SUPABASE_DB_PASS", "")
 
-# Extract project ref from URL: https://XXXX.supabase.co
 PROJECT_REF = SUPABASE_URL.replace("https://", "").split(".")[0] if SUPABASE_URL else ""
 DB_URL = f"postgresql://postgres:{SUPABASE_DB_PASS}@db.{PROJECT_REF}.supabase.co:5432/postgres" if PROJECT_REF else ""
 
@@ -50,15 +49,11 @@ GERALD_SEED_WISDOMS = [
 ]
 
 async def setup_database():
-    """Create table via direct PostgreSQL connection and seed if empty"""
     if not DB_URL:
         print("No DB_URL configured, skipping DB setup")
         return
-    
     try:
         conn = await asyncpg.connect(DB_URL)
-        
-        # Create table if not exists
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS wisdoms (
                 id BIGSERIAL PRIMARY KEY,
@@ -68,12 +63,8 @@ async def setup_database():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
-        
-        # Check if empty
         count = await conn.fetchval("SELECT COUNT(*) FROM wisdoms")
-        
         if count == 0:
-            # Seed with Gerald's wisdom
             for wisdom, author in GERALD_SEED_WISDOMS:
                 await conn.execute(
                     "INSERT INTO wisdoms (wisdom, author, approved) VALUES ($1, $2, $3)",
@@ -82,13 +73,10 @@ async def setup_database():
             print(f"🐹 Seeded {len(GERALD_SEED_WISDOMS)} Gerald wisdoms!")
         else:
             print(f"🐹 Database already has {count} wisdoms, skipping seed.")
-        
         await conn.close()
         print("🐹 Database setup complete!")
-        
     except Exception as e:
         print(f"Database setup error: {e}")
-        # Don't crash - app can still work if table already exists
 
 @app.on_event("startup")
 async def startup():
@@ -108,7 +96,6 @@ def root():
 
 @app.get("/wisdom/random")
 async def get_random_wisdom():
-    """Get a random piece of Gerald's unhinged wisdom"""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/wisdoms?select=*&approved=eq.true",
@@ -118,17 +105,11 @@ async def get_random_wisdom():
         raise HTTPException(status_code=500, detail="Gerald is napping. Try again.")
     items = resp.json()
     if not items:
-        return {
-            "id": 0,
-            "wisdom": "The wheel never lies. Only you lie. About the wheel.",
-            "author": "Gerald",
-            "approved": True,
-        }
+        return {"id": 0, "wisdom": "The wheel never lies. Only you lie. About the wheel.", "author": "Gerald", "approved": True}
     return random.choice(items)
 
 @app.get("/wisdom/all")
 async def get_all_wisdom():
-    """Get all approved wisdom"""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/wisdoms?select=*&approved=eq.true&order=created_at.desc",
@@ -140,21 +121,15 @@ async def get_all_wisdom():
 
 @app.post("/wisdom/submit")
 async def submit_wisdom(body: WisdomSubmit):
-    """Submit your own hamster wisdom"""
     if len(body.wisdom) < 5:
         raise HTTPException(status_code=400, detail="Gerald demands more words.")
     if len(body.wisdom) > 280:
         raise HTTPException(status_code=400, detail="Even Gerald has limits. 280 chars max.")
-    
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{SUPABASE_URL}/rest/v1/wisdoms",
             headers=HEADERS,
-            json={
-                "wisdom": body.wisdom,
-                "author": body.author[:50],
-                "approved": True,
-            },
+            json={"wisdom": body.wisdom, "author": body.author[:50], "approved": True},
         )
     if resp.status_code not in (200, 201):
         raise HTTPException(status_code=500, detail="Gerald ate your submission. Try again.")
@@ -162,7 +137,6 @@ async def submit_wisdom(body: WisdomSubmit):
 
 @app.get("/wisdom/count")
 async def get_count():
-    """How many wisdoms does Gerald hold?"""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/wisdoms?select=id&approved=eq.true",
