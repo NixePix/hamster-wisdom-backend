@@ -4,7 +4,6 @@ from pydantic import BaseModel
 import os
 import httpx
 import random
-import psycopg2
 
 app = FastAPI(title="Hamster Wisdom API")
 
@@ -21,9 +20,6 @@ SUPABASE_KEY = os.environ.get("SUPABASE_API_KEY", "")
 SUPABASE_DB_PASS = os.environ.get("SUPABASE_DB_PASS", "")
 
 PROJECT_REF = SUPABASE_URL.replace("https://", "").split(".")[0] if SUPABASE_URL else ""
-DB_URL = "postgresql://postgres:{pw}@db.{ref}.supabase.co:5432/postgres".format(
-    pw=SUPABASE_DB_PASS, ref=PROJECT_REF
-) if PROJECT_REF else ""
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -51,12 +47,34 @@ GERALD_SEED_WISDOMS = [
 ]
 
 
-def setup_database():
-    if not DB_URL:
-        print("No DB_URL, skipping setup")
+async def setup_database():
+    """Create table and seed via psycopg2 with SSL"""
+    if not PROJECT_REF or not SUPABASE_DB_PASS:
+        print("Missing DB config, skipping setup")
         return
+
     try:
-        conn = psycopg2.connect(DB_URL)
+        import psycopg2
+        # Try multiple connection approaches
+        hosts_to_try = [
+            f"postgresql://postgres:{SUPABASE_DB_PASS}@db.{PROJECT_REF}.supabase.co:5432/postgres?sslmode=require",
+            f"postgresql://postgres.{PROJECT_REF}:{SUPABASE_DB_PASS}@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+            f"postgresql://postgres.{PROJECT_REF}:{SUPABASE_DB_PASS}@aws-0-eu-central-1.pooler.supabase.com:5432/postgres",
+        ]
+
+        conn = None
+        for db_url in hosts_to_try:
+            try:
+                conn = psycopg2.connect(db_url, connect_timeout=10)
+                print("Connected to DB via: " + db_url.split("@")[1][:30])
+                break
+            except Exception as e:
+                print("Connection attempt failed: " + str(e)[:100])
+
+        if not conn:
+            print("All DB connection attempts failed")
+            return
+
         cur = conn.cursor()
         cur.execute(
             "CREATE TABLE IF NOT EXISTS wisdoms ("
@@ -77,17 +95,19 @@ def setup_database():
                     (w, a)
                 )
             conn.commit()
-            print("Seeded Gerald wisdoms!")
+            print("Seeded " + str(len(GERALD_SEED_WISDOMS)) + " Gerald wisdoms!")
+        else:
+            print("DB already has " + str(count) + " wisdoms")
         cur.close()
         conn.close()
-        print("DB ready!")
+        print("DB setup complete!")
     except Exception as e:
         print("DB setup error: " + str(e))
 
 
 @app.on_event("startup")
 async def startup():
-    setup_database()
+    await setup_database()
 
 
 class WisdomSubmit(BaseModel):
@@ -108,7 +128,7 @@ async def get_random_wisdom():
             headers=HEADERS,
         )
     if resp.status_code != 200:
-        raise HTTPException(status_code=500, detail="Gerald is napping.")
+        raise HTTPException(status_code=500, detail="Gerald is napping. Error: " + str(resp.status_code) + " " + resp.text[:100])
     items = resp.json()
     if not items:
         return {"id": 0, "wisdom": "The wheel never lies.", "author": "Gerald", "approved": True}
@@ -123,7 +143,7 @@ async def get_all_wisdom():
             headers=HEADERS,
         )
     if resp.status_code != 200:
-        raise HTTPException(status_code=500, detail="Gerald knocked over the database.")
+        raise HTTPException(status_code=500, detail="Error: " + resp.text[:100])
     return resp.json()
 
 
@@ -140,7 +160,7 @@ async def submit_wisdom(body: WisdomSubmit):
             json={"wisdom": body.wisdom, "author": body.author[:50], "approved": True},
         )
     if resp.status_code not in (200, 201):
-        raise HTTPException(status_code=500, detail="Gerald ate your submission.")
+        raise HTTPException(status_code=500, detail="Error: " + resp.text[:100])
     return {"message": "Gerald approves!", "data": resp.json()}
 
 
@@ -153,3 +173,14 @@ async def get_count():
         )
     count = resp.headers.get("content-range", "?/?").split("/")[-1]
     return {"count": count, "unit": "nuggets of hamster wisdom"}
+
+
+@app.get("/debug")
+async def debug():
+    """Debug endpoint to check config"""
+    return {
+        "supabase_url": SUPABASE_URL,
+        "supabase_key_length": len(SUPABASE_KEY) if SUPABASE_KEY else 0,
+        "project_ref": PROJECT_REF,
+        "db_pass_length": len(SUPABASE_DB_PASS) if SUPABASE_DB_PASS else 0,
+    }
